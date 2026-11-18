@@ -1,0 +1,99 @@
+widget "mes commits github" {
+  page: 1
+  order: 30
+  size: 6x5
+  minSize: 4x4
+  meta { description: "Les derniers commits de @Tasour sur GitHub : le projet, le message et le temps écoulé. Un tap ouvre le commit."; version: "1.1"; license: "MIT"; category: "dev"; owl: 23 }
+
+  source now = clock every 1m
+  source feed = http("https://api.github.com/search/commits?q=author%3ATasour&sort=committer-date&order=desc&per_page=100&page=1", {Accept: "application/vnd.github+json"}) every 5m timeout 15s json status
+  source feed2 = http("https://api.github.com/search/commits?q=author%3ATasour&sort=committer-date&order=desc&per_page=100&page=2", {Accept: "application/vnd.github+json"}) every 5m timeout 15s json status
+
+  let result = feed.out ?? {}
+  let result2 = feed2.out ?? {}
+  let commits = ((result.items ?? []) + (result2.items ?? [])).filter(c => c.sha != null && c.commit.committer.date != null).take(200)
+  let failed = (feed != null && feed.ok == false) || (feed2 != null && feed2.ok == false)
+  let failedCode = feed != null && feed.ok == false ? feed.code : feed2 != null && feed2.ok == false ? feed2.code : 0
+
+  let palette = [cyan, green, orange, magenta, blue, yellow, red]
+  let named = {
+    "Tasour/corps-humain": yellow,
+    "Tasour/arbre-genealogique-tassier": blue,
+    "Tasour/vectemporel": orange,
+    "Tasour/noeta": cyan
+  }
+
+  component Ago(t) {
+    let s = t == null || now == null ? 0 : max(0, now - t)
+    let y = floor(s / 31536000)
+    let txt = s < 60 ? "à l'instant"
+      : s < 3600 ? "il y a ${floor(s / 60)} min"
+      : s < 86400 ? "il y a ${floor(s / 3600)} h"
+      : s < 604800 ? "il y a ${floor(s / 86400)} j"
+      : s < 2592000 ? "il y a ${floor(s / 604800)} sem."
+      : s < 31536000 ? "il y a ${floor(s / 2592000)} mois"
+      : "il y a ${y} an${y > 1 ? "s" : ""}"
+    Text {
+      text: txt
+      fontSize: 12
+      bold: s < 3600
+      color: s < 3600 ? mix(green, foreground, 0.2) : s < 86400 ? mix(green, foreground, 0.55) : mix(muted, foreground, 0.5)
+      maxLines: 1
+    }
+  }
+
+  component CommitCard(c) {
+    let name = c.repository.full_name ?? ""
+    let tint = get(named, name, palette[int(hash(name) * len(palette))])
+    let when = parseTime(c.commit.committer.date)
+    let msg = split(c.commit.message ?? "(sans message)", "\n")[0]
+    Column {
+      gap: 1
+      padding: [8, 5]
+      radius: 6
+      background: alpha(surface, 0.65)
+      onTap: url(c.html_url)
+      Row {
+        gap: 5
+        align: center
+        Box { width: 3; height: 16; background: tint; radius: 2 }
+        Text { text: split(name, "/")[1] ?? name ?? "dépôt inconnu"; fontSize: 13; bold: true; color: mix(tint, foreground, 0.25); maxLines: 1; weight: 1 }
+        Ago { t: when }
+      }
+      Text { text: msg; fontSize: 14; color: foreground; maxLines: len(msg) > 42 ? 2 : 1 }
+      Text { text: "${sub(c.sha, 0, 7)} · ${fmtTime(when, "d MMM HH:mm", null, "fr") ?? "date inconnue"}"; fontSize: 12; color: mix(muted, foreground, 0.45); font: mono; maxLines: 1 }
+    }
+  }
+
+  Column {
+    gap: 5
+    padding: [8, 6]
+
+    Row {
+      gap: 6
+      align: center
+      Text { text: "mes commits"; fontSize: 18; bold: true; color: foreground; weight: 1 }
+      Text { text: feed == null || feed2 == null ? "…" : failed ? "GitHub ${failedCode}" : "@Tasour · ${len(commits)}"; fontSize: 12; color: mix(muted, foreground, 0.5) }
+      Text { text: "↻"; fontSize: 20; color: accent; padding: [6, 4]; onTap: refresh() }
+    }
+
+    if feed == null || feed2 == null {
+      Text { text: "chargement des commits…"; fontSize: 13; color: mix(muted, foreground, 0.5) }
+    } else if failed {
+      Text { text: failedCode == 403 || failedCode == 429 ? "Limite GitHub atteinte, réessaie dans un peu." : "GitHub n'a pas répondu (${failedCode})."; fontSize: 12; color: red; maxLines: 2 }
+    } else if len(commits) == 0 {
+      Text { text: "Aucun commit public trouvé."; fontSize: 13; color: mix(muted, foreground, 0.5) }
+    } else {
+      Column {
+        scroll: true
+        lazy: true
+        onPull: refresh()
+        weight: 1
+        gap: 4
+        for c in commits key c.sha {
+          CommitCard { c: c }
+        }
+      }
+    }
+  }
+}
