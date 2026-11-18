@@ -3,17 +3,79 @@ widget "mes commits github" {
   order: 30
   size: 6x5
   minSize: 4x4
-  meta { description: "Les derniers commits de @Tasour sur GitHub : le projet, le message et le temps écoulé. Un tap ouvre le commit."; version: "1.1"; license: "MIT"; category: "dev"; owl: 23 }
+  meta { description: "Les derniers commits de @Tasour sur GitHub : le projet, le message et le temps écoulé. Un tap ouvre le commit. Vérification unique puis pause du refresh pour éviter la limite de requêtes."; version: "1.2"; license: "MIT"; category: "dev"; owl: 23 }
 
   source now = clock every 1m
+  source tick = clock every 1s
   source feed = http("https://api.github.com/search/commits?q=author%3ATasour&sort=committer-date&order=desc&per_page=100&page=1", {Accept: "application/vnd.github+json"}) every 5m timeout 15s json status
   source feed2 = http("https://api.github.com/search/commits?q=author%3ATasour&sort=committer-date&order=desc&per_page=100&page=2", {Accept: "application/vnd.github+json"}) every 5m timeout 15s json status
+
+  state feedFresh = false
+  state feed2Fresh = false
+  state lockUntil = 0
+  state banner = ""
+  state bannerOk = false
+  state ask = 0
 
   let result = feed.out ?? {}
   let result2 = feed2.out ?? {}
   let commits = ((result.items ?? []) + (result2.items ?? [])).filter(c => c.sha != null && c.commit.committer.date != null).take(200)
   let failed = (feed != null && feed.ok == false) || (feed2 != null && feed2.ok == false)
   let failedCode = feed != null && feed.ok == false ? feed.code : feed2 != null && feed2.ok == false ? feed2.code : 0
+  let locked = tick != null && tick < lockUntil
+
+  on feed first {
+    feedFresh = feed.ok == true
+    if feed.ok == false && (feed.code == 403 || feed.code == 429) {
+      lockUntil = tick == null ? 0 : tick + 15
+      banner = len(commits) > 0 ? "Limite GitHub atteinte · dernières données conservées" : "Limite GitHub atteinte · aucune donnée en cache"
+      bannerOk = false
+    }
+  }
+
+  on feed2 first {
+    feed2Fresh = feed2.ok == true
+    if feed2.ok == false && (feed2.code == 403 || feed2.code == 429) {
+      lockUntil = tick == null ? 0 : tick + 15
+      banner = len(commits) > 0 ? "Limite GitHub atteinte · dernières données conservées" : "Limite GitHub atteinte · aucune donnée en cache"
+      bannerOk = false
+    }
+  }
+
+  // Une seule vérification : quand les deux pages sont bonnes, on annonce que
+  // ce sont bien les dernières données et on bloque le refresh quelques secondes.
+  when feedFresh && feed2Fresh && len(commits) > 0 {
+    lockUntil = tick == null ? 0 : tick + 8
+    banner = "✓ Ce sont bien les dernières données"
+    bannerOk = true
+  }
+
+  on tick first {
+    if failed && (failedCode == 403 || failedCode == 429) && lockUntil == 0 {
+      lockUntil = tick + 15
+    }
+  }
+
+  on tick {
+    if lockUntil > 0 && tick >= lockUntil {
+      lockUntil = 0
+      banner = ""
+    }
+  }
+
+  on ask {
+    if locked {
+      banner = "✓ Dernières données vérifiées · ${lockUntil - tick}s"
+      bannerOk = true
+    } else {
+      feedFresh = false
+      feed2Fresh = false
+      lockUntil = tick == null ? 0 : tick + 8
+      banner = "Vérification des dernières données…"
+      bannerOk = false
+      refresh()
+    }
+  }
 
   let palette = [cyan, green, orange, magenta, blue, yellow, red]
   let named = {
@@ -73,21 +135,27 @@ widget "mes commits github" {
       gap: 6
       align: center
       Text { text: "mes commits"; fontSize: 18; bold: true; color: foreground; weight: 1 }
-      Text { text: feed == null || feed2 == null ? "…" : failed ? "GitHub ${failedCode}" : "@Tasour · ${len(commits)}"; fontSize: 12; color: mix(muted, foreground, 0.5) }
-      Text { text: "↻"; fontSize: 20; color: accent; padding: [6, 4]; onTap: refresh() }
+      Text { text: locked && len(commits) > 0 ? (failed ? "dernières données (${lockUntil - tick}s)" : "✓ à jour (${lockUntil - tick}s)") : feed == null || feed2 == null ? "…" : failed ? "GitHub ${failedCode}" : "@Tasour · ${len(commits)}"; fontSize: 12; color: locked && !failed ? green : mix(muted, foreground, 0.5) }
+      Text { text: "↻"; fontSize: 20; color: accent; padding: [6, 4]; onTap: ask = ask + 1 }
+    }
+
+    if banner != "" {
+      Text { text: banner; fontSize: 12; color: bannerOk ? green : red; maxLines: 2 }
     }
 
     if feed == null || feed2 == null {
       Text { text: "chargement des commits…"; fontSize: 13; color: mix(muted, foreground, 0.5) }
     } else if failed {
-      Text { text: failedCode == 403 || failedCode == 429 ? "Limite GitHub atteinte, réessaie dans un peu." : "GitHub n'a pas répondu (${failedCode})."; fontSize: 12; color: red; maxLines: 2 }
+      if failedCode != 403 && failedCode != 429 {
+        Text { text: "GitHub n'a pas répondu (${failedCode})."; fontSize: 12; color: red; maxLines: 2 }
+      }
     } else if len(commits) == 0 {
       Text { text: "Aucun commit public trouvé."; fontSize: 13; color: mix(muted, foreground, 0.5) }
     } else {
       Column {
         scroll: true
         lazy: true
-        onPull: refresh()
+        onPull: ask = ask + 1
         weight: 1
         gap: 4
         for c in commits key c.sha {
